@@ -4,47 +4,65 @@ import time
 from datetime import datetime
 
 import requests
-from chat_downloader import ChatDownloader
-from chat_downloader.errors import ChatDownloaderError, ParsingError
-from chat_downloader.sites.youtube import YouTubeChatDownloader
+import pytchat
 
-# Message types chat-downloader uses for YouTube superchats/superstickers
-SUPERCHAT_TYPE = "paid_message"
-SUPERSTICKER_TYPE = "paid_sticker"
+# Message types exposed by pytchat-ng for paid messages.
+SUPERCHAT_TYPE = "superChat"
+SUPERSTICKER_TYPE = "membershipItem"
+
+
+class ChatBackendError(RuntimeError):
+    """Raised when pytchat cannot open or maintain a live-chat session."""
+
+
+class _PytchatIterator:
+    def __init__(self, video_id):
+        self.chat = pytchat.create(video_id=video_id)
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        while self.chat.is_alive():
+            batch = self.chat.get()
+            for item in batch.sync_items():
+                return {
+                    "author": {"name": getattr(item.author, "name", "Unknown")},
+                    "message": getattr(item, "message", ""),
+                    "message_type": getattr(item, "type", "textMessage"),
+                    "money": {"text": getattr(item, "amountString", "N/A")},
+                    "timestamp": _timestamp_microseconds(getattr(item, "datetime", None)),
+                }
+            time.sleep(0.25)
+        raise StopIteration
+
+
+def _timestamp_microseconds(value):
+    if not value:
+        return None
+    try:
+        return int(datetime.strptime(value, "%Y-%m-%d %H:%M:%S").timestamp() * 1_000_000)
+    except (TypeError, ValueError):
+        return None
+
+
+class ChatDownloaderError(ChatBackendError):
+    pass
+
+
+class ParsingError(ChatBackendError):
+    pass
+
+
+SUPERCHAT_TYPE_ALIASES = {SUPERCHAT_TYPE, "paidMessage"}
+SUPERSTICKER_TYPE_ALIASES = {SUPERSTICKER_TYPE, "paidSticker"}
+
+# The old chat-downloader package relied on a page scraper which YouTube now
+# frequently answers with a recaptcha page. pytchat-ng uses the live-chat
+# continuation endpoint directly and is therefore much more reliable here.
 
 MIN_BACKOFF_SECONDS = 5
 MAX_BACKOFF_SECONDS = 60
-
-# chat-downloader (last released 2022) only recognises the *classic* watch-page
-# template, where the data is inlined directly into a JS assignment:
-#   ytInitialData = {...};
-# YouTube now serves an alternate template for a portion of requests, where
-# the same data instead sits in a dedicated JSON-typed <script> tag and gets
-# assigned via JS at runtime:
-#   <script id="yt-initial-data" type="application/json">{...}</script>
-#   ...
-#   var ytDataEl = document.getElementById('yt-initial-data');
-#   window['ytInitialData'] = JSON.parse(ytDataEl.textContent);
-# chat-downloader's regex never matches that second template, and unlike most
-# of its other failure modes this one is NOT retried internally - it's raised
-# straight away as an unretryable ParsingError ("Unable to parse initial video
-# data"), which is what intermittently broke the chat connection here (roughly
-# every 1 in 10 requests hit this template in testing). Patching the regex to
-# also recognise the JSON-script-tag form fixes it at the source, for every
-# caller of chat_downloader in this process.
-YouTubeChatDownloader._YT_INITIAL_DATA_RE = (
-    r'(?:'
-    r'(?:window\s*\[\s*["\']ytInitialData["\']\s*\]|ytInitialData)\s*=\s*'
-    r'|'
-    r'<script[^>]+id=["\']yt-initial-data["\'][^>]*>'
-    r')'
-    r'({.+?})'
-    r'(?:'
-    r'\s*;' + YouTubeChatDownloader._YT_INITIAL_BOUNDARY_RE +
-    r'|'
-    r'</script'
-    r')'
-)
 
 
 class ChatWatcher:
@@ -123,33 +141,20 @@ class ChatWatcher:
             print(f"[chat] Diagnostic fetch also failed: {diag_error}")
 
     def _connect(self):
-        """Fetch the watch page and start the chat generator, retrying a
-        handful of times close together first. chat-downloader treats a 200
-        response that's missing the embedded page data ("Unable to parse
-        initial video data") as an unretryable fatal error - it does NOT
-        retry that case internally despite its own max_attempts setting -
-        even though, empirically, that specific response from YouTube is a
-        transient blip most of the time (a fresh attempt secs later usually
-        works). Clearing it here, close together, avoids surfacing it to the
-        caller's much slower backoff and dropping chat messages for a full
-        backoff cycle every time it happens.
-        """
+        """Open YouTube's live-chat continuation stream through pytchat-ng."""
         attempts, retry_delay_seconds = 4, 2
         last_error = None
         for attempt in range(1, attempts + 1):
             print(f"[chat] Connecting to YouTube live chat (attempt {attempt}/{attempts})...")
             try:
-                chat = ChatDownloader(cookies=self.cookies_file).get_chat(self.video_id)
-                iterator = iter(chat)
+                iterator = iter(_PytchatIterator(self.video_id))
                 first_item = next(iterator, None)
                 return first_item, iterator
-            except ChatDownloaderError as e:
-                last_error = e
-                if isinstance(e, ParsingError) and attempt < attempts:
+            except Exception as error:
+                last_error = error
+                if attempt < attempts:
                     time.sleep(retry_delay_seconds)
-                else:
-                    raise
-        raise last_error
+        raise ChatBackendError(str(last_error)) from last_error
 
     def _run(self):
         backoff = MIN_BACKOFF_SECONDS
@@ -200,8 +205,8 @@ class ChatWatcher:
         else:
             timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-        is_superchat = message_type == SUPERCHAT_TYPE
-        is_supersticker = message_type == SUPERSTICKER_TYPE
+        is_superchat = message_type in SUPERCHAT_TYPE_ALIASES
+        is_supersticker = message_type in SUPERSTICKER_TYPE_ALIASES
         amount = money.get("text", "N/A") if money else "N/A"
 
         if is_superchat:
