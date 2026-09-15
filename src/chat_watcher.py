@@ -1,8 +1,11 @@
+import http.cookiejar
 import queue
 import threading
 import time
 from datetime import datetime
+from pathlib import Path
 
+import httpx
 import requests
 import pytchat
 
@@ -15,9 +18,21 @@ class ChatBackendError(RuntimeError):
     """Raised when pytchat cannot open or maintain a live-chat session."""
 
 
+def _load_cookies(cookie_path):
+    if not cookie_path:
+        return {}
+    path = Path(cookie_path).expanduser()
+    if not path.is_file():
+        raise FileNotFoundError(f"YouTube cookies file not found: {path}")
+    jar = http.cookiejar.MozillaCookieJar(str(path))
+    jar.load(ignore_discard=True, ignore_expires=True)
+    return {cookie.name: cookie.value for cookie in jar}
+
+
 class _PytchatIterator:
-    def __init__(self, video_id):
-        self.chat = pytchat.create(video_id=video_id)
+    def __init__(self, video_id, cookies_file=None):
+        client = httpx.Client(http2=True, cookies=_load_cookies(cookies_file), timeout=20.0)
+        self.chat = pytchat.create(video_id=video_id, client=client)
 
     def __iter__(self):
         return self
@@ -147,10 +162,15 @@ class ChatWatcher:
         for attempt in range(1, attempts + 1):
             print(f"[chat] Connecting to YouTube live chat (attempt {attempt}/{attempts})...")
             try:
-                iterator = iter(_PytchatIterator(self.video_id))
+                iterator = iter(_PytchatIterator(self.video_id, self.cookies_file))
                 first_item = next(iterator, None)
                 return first_item, iterator
             except Exception as error:
+                if "LOGIN_REQUIRED" in str(error) or "Sign in to confirm" in str(error):
+                    raise ChatBackendError(
+                        "YouTube wymaga logowania dla tej transmisji. "
+                        "Ustaw YOUTUBE_COOKIES_FILE na plik cookies.txt z zalogowanej przeglądarki."
+                    ) from error
                 last_error = error
                 if attempt < attempts:
                     time.sleep(retry_delay_seconds)
