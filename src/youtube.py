@@ -1,37 +1,46 @@
 import re
+from urllib.parse import parse_qs, urlparse
+
+
+_VIDEO_ID_RE = re.compile(r"^[A-Za-z0-9_-]{11}$")
 
 
 def validate_live_stream_id(input_string):
-    """
-    Extracts video ID from YouTube URL or returns the string as is if it's already an ID.
+    """Return the YouTube video ID from a live, Shorts, or watch URL.
 
-    Supported formats:
-    - https://www.youtube.com/watch?v=uvubgYqg9VQ
-    - https://www.youtube.com/live/uvubgYqg9VQ?si=dfmI1IOGu4NRlxtM
-    - https://youtu.be/uvubgYqg9VQ
-    - uvubgYqg9VQ (direct ID)
-
-    Args:
-        input_string (str): YouTube video URL or ID
-
-    Returns:
-        str: Extracted video ID or None if extraction failed
+    YouTube live streams can be shared as ``/live/ID``, ``/watch?v=ID``,
+    ``/shorts/ID`` or ``youtu.be/ID``.  The Shorts form is important here:
+    YouTube often presents vertical live streams using that route.
     """
     if not input_string:
         return None
 
-    # Patterns for different YouTube URL formats
-    patterns = [
-        r'(?:youtube\.com/watch\?v=|youtube\.com/live/)([a-zA-Z0-9_-]{11})',  # watch?v= or live/
-        r'youtu\.be/([a-zA-Z0-9_-]{11})',  # youtu.be/
-        r'^([a-zA-Z0-9_-]{11})$'  # Direct ID (11 characters)
-    ]
+    value = input_string.strip()
+    if _VIDEO_ID_RE.fullmatch(value):
+        return value
 
-    for pattern in patterns:
-        match = re.search(pattern, input_string)
-        if match:
-            return match.group(1)
+    candidate = value if "://" in value else f"https://{value}"
+    try:
+        parsed = urlparse(candidate)
+    except ValueError:
+        return None
 
-    # If nothing found, return None
-    print(f"Failed to extract ID from string: {input_string}")
+    host = parsed.netloc.lower().split(":", 1)[0]
+    if host.startswith("www."):
+        host = host[4:]
+    if host not in {"youtube.com", "m.youtube.com", "youtu.be"}:
+        print(f"Failed to extract YouTube ID from string: {input_string}")
+        return None
+
+    if host == "youtu.be":
+        path_id = parsed.path.strip("/").split("/")[0]
+    else:
+        parts = [part for part in parsed.path.split("/") if part]
+        path_id = parts[1] if len(parts) >= 2 and parts[0].lower() in {"live", "shorts", "embed"} else ""
+        path_id = path_id or parse_qs(parsed.query).get("v", [""])[0]
+
+    if _VIDEO_ID_RE.fullmatch(path_id):
+        return path_id
+
+    print(f"Failed to extract YouTube ID from string: {input_string}")
     return None

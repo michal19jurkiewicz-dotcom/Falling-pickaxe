@@ -18,7 +18,7 @@ def validate_live_stream_id(input_string):
     
     # Patterns for various YouTube URL formats
     patterns = [
-        r'(?:youtube\.com/watch\?v=|youtube\.com/live/)([a-zA-Z0-9_-]{11})',  # watch?v= or live/
+        r'(?:youtube\.com/watch\?v=|youtube\.com/live/|youtube\.com/shorts/)([a-zA-Z0-9_-]{11})',  # watch?v=, live/ or shorts/
         r'youtu\.be/([a-zA-Z0-9_-]{11})',  # youtu.be/
         r'^([a-zA-Z0-9_-]{11})$'  # Direct ID (11 characters)
     ]
@@ -33,7 +33,8 @@ def validate_live_stream_id(input_string):
 # Test cases
 test_cases = [
     "https://www.youtube.com/watch?v=uvubgYqg9VQ",
-    "https://www.youtube.com/live/uvubgYqg9VQ?si=dfmI1IOGu4NRlxtM", 
+    "https://www.youtube.com/live/uvubgYqg9VQ?si=dfmI1IOGu4NRlxtM",
+    "https://www.youtube.com/shorts/uvubgYqg9VQ?feature=share",
     "https://youtu.be/uvubgYqg9VQ",
     "uvubgYqg9VQ",
     "https://www.youtube.com/watch?v=dQw4w9WgXcQ&t=42s",
