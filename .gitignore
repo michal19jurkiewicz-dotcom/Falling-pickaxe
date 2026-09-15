@@ -176,6 +176,7 @@ cython_debug/
 
 # Config with credentials 
 config.json
+cookies.txt
 
 # Ignore logs 
 logs/*
